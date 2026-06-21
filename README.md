@@ -1,102 +1,243 @@
-# 🔄 Pipeline ETL — Cotações de Moedas (API → PostgreSQL)
+# 🔄 Pipeline ETL — Cotações de Moedas
 
-Pipeline ETL em Python que consome cotações de moedas e criptomoedas em tempo real via API pública, aplica regras de qualidade e enriquecimento, e persiste em PostgreSQL. Agendado automaticamente via **GitHub Actions** a cada 6 horas.
+Pipeline ETL em Python que coleta cotações de moedas e criptomoedas em tempo real via API pública, aplica regras de qualidade e enriquecimento, e persiste em **PostgreSQL** hospedado no Supabase. Executado automaticamente a cada 6 horas via **GitHub Actions**.
+
+[![ETL Cotações](https://github.com/lubj9/etl-cotacoes-pipeline/actions/workflows/etl.yml/badge.svg)](https://github.com/lubj9/etl-cotacoes-pipeline/actions/workflows/etl.yml)
+
+---
+
+## 🟢 Status atual
+
+Pipeline rodando em produção, agendado a cada 6 horas. Dados sendo persistidos em PostgreSQL gerenciado.
+
+> 📸 _Adicione aqui o print de uma execução verde do GitHub Actions e o print da tabela `cotacoes` populada no Supabase._
+
+---
 
 ## 🎯 O que o projeto demonstra
 
-- **Extract**: consumo de API REST com tratamento de erros e timeout
-- **Transform**: limpeza, validação, deduplicação e enriquecimento de dados
-- **Load**: persistência idempotente em PostgreSQL com upsert via SQL nativo
-- **Orquestração**: agendamento serverless com GitHub Actions
-- **Boas práticas**: logging estruturado, secrets via variáveis de ambiente, schema versionado
+- **ETL end-to-end** com separação clara das fases (Extract, Transform, Load)
+- **Resiliência de rede**: retry com backoff exponencial e tratamento específico de HTTP 429 (rate limit)
+- **Idempotência**: pipeline pode ser reexecutado sem gerar duplicatas
+- **Orquestração serverless** via GitHub Actions (zero infraestrutura para manter)
+- **Portabilidade**: mesmo código roda em SQLite (desenvolvimento local) e PostgreSQL (produção)
+- **Segurança**: credenciais via secrets, nunca no código
+- **Observabilidade**: logging estruturado e artefatos de log armazenados a cada execução
+
+---
 
 ## 🛠️ Stack
 
-- **Python 3.11** · pandas · requests · SQLAlchemy
-- **PostgreSQL** (produção) / **SQLite** (desenvolvimento local — fallback automático)
-- **GitHub Actions** (agendador)
-- **Render** ou **Supabase** (banco gerenciado free tier)
+| Camada | Tecnologia |
+|---|---|
+| Linguagem | Python 3.11 |
+| HTTP | requests |
+| Manipulação de dados | pandas |
+| Persistência | SQLAlchemy + psycopg2 |
+| Banco (produção) | PostgreSQL (Supabase free tier) |
+| Banco (local) | SQLite (fallback automático) |
+| Orquestração | GitHub Actions |
+| Fonte de dados | [AwesomeAPI](https://docs.awesomeapi.com.br/) |
+
+---
+
+## 🧭 Arquitetura
+
+```
+                 ┌──────────────────────┐
+                 │   GitHub Actions     │
+                 │   cron: */6h         │
+                 └──────────┬───────────┘
+                            │
+                            ▼
+    ┌─────────────────────────────────────────────────┐
+    │                  main.py                        │
+    │  ┌──────────┐   ┌────────────┐   ┌──────────┐   │
+    │  │ extract  │ → │ transform  │ → │   load   │   │
+    │  └────┬─────┘   └────────────┘   └─────┬────┘   │
+    └───────┼──────────────────────────────────┼──────┘
+            │                                  │
+            ▼                                  ▼
+   ┌──────────────────┐              ┌──────────────────┐
+   │   AwesomeAPI     │              │   PostgreSQL     │
+   │ (cotações reais) │              │   (Supabase)     │
+   └──────────────────┘              └──────────────────┘
+```
+
+---
 
 ## 📁 Estrutura
 
 ```
 .
 ├── etl/
-│   ├── extract.py      # Coleta da API AwesomeAPI
-│   ├── transform.py    # Limpeza, dedup, enriquecimento
-│   └── load.py         # Schema + upsert no PostgreSQL
-├── main.py             # Orquestrador (E → T → L)
-├── analise.py          # Consultas SQL sobre os dados coletados
-├── .github/workflows/
-│   └── etl.yml         # Agendamento a cada 6h
+│   ├── extract.py        # Coleta da API, com retry e backoff exponencial
+│   ├── transform.py      # Validação, deduplicação, enriquecimento
+│   ├── load.py           # Schema + upsert idempotente
+│   └── __init__.py
+├── main.py               # Orquestrador (E → T → L)
+├── analise.py            # Consultas SQL sobre os dados coletados
+├── .github/
+│   └── workflows/
+│       └── etl.yml       # Agendamento e execução no GitHub Actions
 ├── requirements.txt
+├── .env.example
 └── README.md
 ```
 
-## 🚀 Como rodar
+---
 
-### Localmente (com SQLite — não precisa instalar Postgres)
+## 🚀 Como rodar localmente
+
+### Pré-requisitos
+- Python 3.10 ou superior
+- Git
+
+### Setup
 
 ```bash
+# 1. Clonar o repositório
+git clone https://github.com/lubj9/etl-cotacoes-pipeline.git
+cd etl-cotacoes-pipeline
+
+# 2. Criar e ativar ambiente virtual
+python -m venv .venv
+# Windows:
+.venv\Scripts\Activate.ps1
+# Linux/Mac:
+source .venv/bin/activate
+
+# 3. Instalar dependências
 pip install -r requirements.txt
-python main.py        # roda o pipeline
-python analise.py     # mostra consultas sobre o que foi coletado
+
+# 4. Rodar o pipeline (usa SQLite local automaticamente)
+python main.py
+
+# 5. Ver análises sobre os dados coletados
+python analise.py
 ```
 
-### Com PostgreSQL real (Supabase / Render free tier)
+Sem `DATABASE_URL` configurada, o pipeline detecta automaticamente e usa SQLite local em `data/cotacoes.db` — útil para desenvolvimento e revisão de código sem precisar provisionar banco.
+
+### Rodar com PostgreSQL real
 
 ```bash
 cp .env.example .env
-# edite .env com sua DATABASE_URL
-export $(cat .env | xargs)
+# editar .env com sua DATABASE_URL
+export $(cat .env | xargs)  # Linux/Mac
+# Windows: defina a variável manualmente no PowerShell
 python main.py
 ```
 
-### Em produção (GitHub Actions)
+---
 
-1. Criar banco no [Supabase](https://supabase.com) (free tier, 500MB)
-2. Em **Settings → Secrets → Actions** do seu repositório, adicionar `DATABASE_URL`
-3. O workflow roda automaticamente a cada 6 horas
+## ☁️ Deploy em produção
 
-## 📊 Schema da tabela
+### 1. Provisionar PostgreSQL no Supabase
+
+1. Criar conta em [supabase.com](https://supabase.com) (gratuito, sem cartão)
+2. **New project** → escolher região South America
+3. Salvar a senha do banco em local seguro
+4. Em **Project Settings → Database → Connection string (URI)**, copiar a string e substituir `[YOUR-PASSWORD]` pela senha real
+
+### 2. Configurar secret no GitHub
+
+No repositório: **Settings → Secrets and variables → Actions → New repository secret**
+- Name: `DATABASE_URL`
+- Value: a connection string completa do Supabase
+
+### 3. Ativar workflows
+
+No repositório: aba **Actions → I understand my workflows, go ahead and enable them**.
+
+O workflow `ETL Cotações` rodará automaticamente a cada 6 horas. Para testar imediatamente, clique em **Run workflow**.
+
+---
+
+## 🗄️ Schema da tabela
 
 ```sql
 CREATE TABLE cotacoes (
     id              SERIAL PRIMARY KEY,
-    codigo          VARCHAR(20) NOT NULL,   -- ex: USD-BRL
+    codigo          VARCHAR(20) NOT NULL,    -- ex: USD-BRL
     nome            VARCHAR(100),
     alta            NUMERIC(18, 6),
     baixa           NUMERIC(18, 6),
     variacao        NUMERIC(18, 6),
     pct_variacao    NUMERIC(8, 4),
-    bid             NUMERIC(18, 6),         -- preço de compra
-    ask             NUMERIC(18, 6),         -- preço de venda
-    spread          NUMERIC(18, 6),         -- enriquecido
-    tendencia       VARCHAR(10),            -- alta / baixa / estável
-    timestamp_origem TIMESTAMP,             -- momento da cotação
-    data_coleta     TIMESTAMP,              -- momento da execução do ETL
-    UNIQUE (codigo, timestamp_origem)       -- garante idempotência
+    bid             NUMERIC(18, 6),          -- preço de compra
+    ask             NUMERIC(18, 6),          -- preço de venda
+    spread          NUMERIC(18, 6),          -- enriquecido: ask - bid
+    tendencia       VARCHAR(10),             -- alta / baixa / estável
+    timestamp_origem TIMESTAMP,              -- momento da cotação
+    data_coleta     TIMESTAMP,               -- momento da execução do ETL
+    UNIQUE (codigo, timestamp_origem)        -- garante idempotência
 );
+
+CREATE INDEX idx_cotacoes_codigo ON cotacoes(codigo);
+CREATE INDEX idx_cotacoes_data ON cotacoes(data_coleta);
 ```
+
+---
 
 ## 🧠 Decisões de design
 
 | Decisão | Por quê |
 |---|---|
-| ETL e não ELT | Volume baixo (5 registros/execução); transformações simples não justificam orquestrador como dbt |
-| SQLAlchemy em vez de psycopg2 puro | Portabilidade — mesmo código roda em SQLite (dev) e Postgres (prod) |
-| Upsert com `ON CONFLICT DO NOTHING` | Idempotência: executar o pipeline 2x não duplica dados |
-| GitHub Actions em vez de Airflow | Custo zero, suficiente para o caso de uso, padrão da indústria para schedules simples |
-| Fallback SQLite | Reviewer consegue rodar e testar em segundos, sem subir banco |
-
-## 🔮 Próximos passos
-
-- Adicionar testes unitários com pytest (mock da API)
-- Métricas de qualidade dos dados (Great Expectations)
-- Dashboard Streamlit consumindo o Postgres
-- Alertas no Telegram quando variação > 3%
+| ETL e não ELT | Volume baixo (~5 registros/execução); transformações simples não justificam um orquestrador como dbt. |
+| SQLAlchemy em vez de psycopg2 puro | Portabilidade: o mesmo código roda em SQLite (desenvolvimento) e PostgreSQL (produção). |
+| Upsert com `ON CONFLICT DO NOTHING` | Idempotência: executar o pipeline duas vezes em sequência não duplica dados. |
+| GitHub Actions em vez de Airflow | Custo zero, suficiente para o caso de uso. Airflow só faria sentido com dezenas de DAGs e dependências entre elas. |
+| Fallback automático para SQLite | Permite que qualquer pessoa clone o repo e rode em segundos, sem provisionar banco. |
+| Retry com backoff exponencial | APIs públicas têm rate limit e instabilidade. Pipeline em produção precisa absorver isso sem falhar. |
+| Distinção entre erros transitórios e permanentes | Só faz retry em 429, 5xx, timeout e ConnectionError. Erros 4xx são problemas da própria requisição e falham imediatamente. |
+| `User-Agent` identificável | Boa prática de cliente HTTP: APIs públicas frequentemente penalizam bots genéricos. |
 
 ---
 
-Desenvolvido por **Lucas Zeferino Baracat**
+## 📊 Consultas analíticas (`analise.py`)
+
+```sql
+-- Última cotação por moeda
+SELECT codigo, nome, bid, pct_variacao, tendencia, data_coleta
+FROM cotacoes
+WHERE (codigo, data_coleta) IN (
+    SELECT codigo, MAX(data_coleta) FROM cotacoes GROUP BY codigo
+);
+
+-- Estatísticas históricas por moeda
+SELECT codigo,
+       COUNT(*) AS n_coletas,
+       AVG(bid) AS media_bid,
+       MIN(bid) AS min_bid,
+       MAX(bid) AS max_bid
+FROM cotacoes
+GROUP BY codigo;
+```
+
+---
+
+## ⚠️ Limitações conhecidas
+
+- **Supabase free tier** pausa projetos após 7 dias sem atividade. Como o workflow roda a cada 6 horas, o banco mantém-se ativo continuamente.
+- **GitHub Actions** desativa workflows agendados em repositórios sem atividade por 60 dias. Commits esporádicos no repositório mantêm o agendamento vivo.
+- A **AwesomeAPI** não exige autenticação, mas aplica rate limit por IP. Como o IP do GitHub Actions é compartilhado, ocasionalmente pode haver bloqueio temporário — daí a importância do retry implementado.
+
+---
+
+## 🔮 Próximos passos
+
+- [ ] Testes unitários com pytest (mocks da API)
+- [ ] Métricas de qualidade dos dados com Great Expectations
+- [ ] Dashboard Streamlit consumindo o PostgreSQL
+- [ ] Notificações no Telegram em variações superiores a 3%
+- [ ] Containerização com Docker para portabilidade adicional
+- [ ] Migração para data warehouse (BigQuery) caso o volume cresça
+
+---
+
+## 👤 Autor
+
+**Lucas Zeferino Baracat**
+Estudante de Sistemas de Informação na Universidade Presbiteriana Mackenzie
 [LinkedIn](https://www.linkedin.com/in/lucasbaracat9/) · [GitHub](https://github.com/lubj9)
