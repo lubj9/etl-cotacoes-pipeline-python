@@ -1,11 +1,20 @@
 """
-Extração: busca cotações de moedas via API do AwesomeAPI (gratuita, sem chave).
+Extração: busca cotações de moedas e criptomoedas via duas fontes complementares.
 
-Inclui estratégia de resiliência:
-- Retry automático com backoff exponencial em falhas transitórias
-- Tratamento específico de rate limit (HTTP 429)
-- User-Agent identificável (evita bloqueio de bots genéricos)
-- Timeout para não travar a execução em caso de instabilidade da API
+Decisão arquitetural:
+- Forex (USD, EUR, GBP vs BRL): Frankfurter API
+    Fonte: Banco Central Europeu. Sem chave, sem rate limit.
+- Cripto (BTC, ETH vs BRL): Binance API pública
+    Endpoints públicos sem chave, limit generoso (~1200/min por IP).
+
+Por que trocamos da AwesomeAPI original:
+    O IP do GitHub Actions é compartilhado entre milhares de workflows simultâneos.
+    APIs com rate limit por IP veem todo esse tráfego coletivo como vindo da mesma
+    origem, esgotando a cota mesmo quando o pipeline individual usa pouco.
+    Frankfurter e Binance pública não sofrem desse problema.
+
+Mantemos a estratégia de resiliência (retry, backoff, timeout) porque mesmo
+APIs robustas têm instabilidades pontuais.
 """
 import logging
 import time
@@ -17,114 +26,158 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Moedas que vamos rastrear (pares contra BRL)
-MOEDAS = ["USD-BRL", "EUR-BRL", "GBP-BRL", "BTC-BRL", "ETH-BRL"]
+# Moedas a coletar
+MOEDAS_FOREX = ["USD", "EUR", "GBP"]  # cotação contra BRL
+CRIPTOS = ["BTC", "ETH"]              # contra BRL via Binance
 
-API_BASE = "https://economia.awesomeapi.com.br/json/last"
+NOMES = {
+    "USD-BRL": "Dolar Americano/Real",
+    "EUR-BRL": "Euro/Real",
+    "GBP-BRL": "Libra Esterlina/Real",
+    "BTC-BRL": "Bitcoin/Real",
+    "ETH-BRL": "Ethereum/Real",
+}
 
-# Configurações de retry
-MAX_TENTATIVAS = 5
-BACKOFF_INICIAL = 2  # segundos; dobra a cada tentativa (2, 4, 8, 16, 32)
-TIMEOUT = 15  # segundos
+FRANKFURTER_BASE = "https://api.frankfurter.dev/v1/latest"
+BINANCE_BASE = "https://api.binance.com/api/v3/ticker/24hr"
 
-# Identifica o cliente — APIs públicas tratam User-Agent identificável melhor
-USER_AGENT = "etl-cotacoes-pipeline/1.0 (github.com/lubj9)"
+# Configurações de resiliência
+MAX_TENTATIVAS = 4
+BACKOFF_INICIAL = 2
+TIMEOUT = 15
+USER_AGENT = "etl-cotacoes-pipeline/2.0 (github.com/lubj9)"
 
 
-def _fazer_requisicao(url: str) -> dict:
-    """
-    Faz a requisição com retry e backoff exponencial.
-    Distingue entre erros transitórios (retry) e permanentes (falha imediata).
-    """
+def _fazer_requisicao(url: str, params: Optional[dict] = None) -> dict:
+    """Requisição HTTP com retry e backoff exponencial."""
     headers = {"User-Agent": USER_AGENT}
     espera = BACKOFF_INICIAL
 
     for tentativa in range(1, MAX_TENTATIVAS + 1):
         try:
-            resp = requests.get(url, headers=headers, timeout=TIMEOUT)
+            resp = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
 
-            # Rate limit: respeita o Retry-After se a API informar
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", espera))
                 logger.warning(
-                    f"Tentativa {tentativa}/{MAX_TENTATIVAS}: rate limit. "
+                    f"Tentativa {tentativa}/{MAX_TENTATIVAS}: rate limit em {url}. "
                     f"Aguardando {retry_after}s..."
                 )
                 time.sleep(retry_after)
                 espera *= 2
                 continue
 
-            # Erros 5xx do servidor: vale tentar de novo
             if 500 <= resp.status_code < 600:
                 logger.warning(
-                    f"Tentativa {tentativa}/{MAX_TENTATIVAS}: erro {resp.status_code} do servidor. "
+                    f"Tentativa {tentativa}/{MAX_TENTATIVAS}: erro {resp.status_code}. "
                     f"Aguardando {espera}s..."
                 )
                 time.sleep(espera)
                 espera *= 2
                 continue
 
-            # Outros erros 4xx: problema da nossa request, não adianta tentar de novo
             resp.raise_for_status()
             return resp.json()
 
-        except requests.exceptions.Timeout:
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as e:
             logger.warning(
-                f"Tentativa {tentativa}/{MAX_TENTATIVAS}: timeout. "
+                f"Tentativa {tentativa}/{MAX_TENTATIVAS}: erro de rede ({e}). "
                 f"Aguardando {espera}s..."
             )
             time.sleep(espera)
             espera *= 2
 
-        except requests.exceptions.ConnectionError as e:
-            logger.warning(
-                f"Tentativa {tentativa}/{MAX_TENTATIVAS}: erro de conexão ({e}). "
-                f"Aguardando {espera}s..."
-            )
-            time.sleep(espera)
-            espera *= 2
+    raise RuntimeError(f"Falha em {url} após {MAX_TENTATIVAS} tentativas.")
 
-    raise RuntimeError(
-        f"Falha ao acessar API após {MAX_TENTATIVAS} tentativas."
+
+def _buscar_forex(data_coleta: datetime) -> list[dict]:
+    """
+    Busca USD, EUR, GBP contra BRL via Frankfurter.
+
+    A API retorna 1 BRL = X moedaEstrangeira. Invertemos para obter a cotação
+    no formato padrão do mercado brasileiro: 1 USD = R$ Y.
+    """
+    logger.info("Buscando forex via Frankfurter...")
+    data = _fazer_requisicao(
+        FRANKFURTER_BASE,
+        params={"base": "BRL", "symbols": ",".join(MOEDAS_FOREX)},
     )
 
-
-def buscar_cotacoes(moedas: Optional[list[str]] = None) -> pd.DataFrame:
-    """
-    Busca cotações atuais para a lista de moedas.
-
-    Returns:
-        DataFrame com colunas: codigo, nome, alta, baixa, variacao, pct_variacao,
-        bid, ask, timestamp_origem, data_coleta.
-    """
-    moedas = moedas or MOEDAS
-    url = f"{API_BASE}/{','.join(moedas)}"
-
-    logger.info(f"Chamando API: {url}")
-    data = _fazer_requisicao(url)
-
     registros = []
-    data_coleta = datetime.now(timezone.utc)
-    for chave, valores in data.items():
+    timestamp_origem = datetime.fromisoformat(data["date"])
+    for moeda in MOEDAS_FOREX:
+        taxa_inversa = float(data["rates"][moeda])
+        if taxa_inversa <= 0:
+            continue
+        bid = 1.0 / taxa_inversa
+        codigo = f"{moeda}-BRL"
         registros.append({
-            "codigo": f"{valores['code']}-{valores['codein']}",
-            "nome": valores["name"],
-            "alta": float(valores["high"]),
-            "baixa": float(valores["low"]),
-            "variacao": float(valores["varBid"]),
-            "pct_variacao": float(valores["pctChange"]),
-            "bid": float(valores["bid"]),
-            "ask": float(valores["ask"]),
-            "timestamp_origem": datetime.fromtimestamp(int(valores["timestamp"])),
+            "codigo": codigo,
+            "nome": NOMES[codigo],
+            "bid": round(bid, 4),
+            "ask": round(bid, 4),
+            "alta": round(bid, 4),
+            "baixa": round(bid, 4),
+            "variacao": 0.0,
+            "pct_variacao": 0.0,
+            "timestamp_origem": datetime.combine(timestamp_origem, datetime.min.time()),
             "data_coleta": data_coleta,
         })
+    return registros
+
+
+def _buscar_cripto(data_coleta: datetime) -> list[dict]:
+    """
+    Busca BTC e ETH contra BRL via Binance pública.
+    """
+    logger.info("Buscando cripto via Binance...")
+    simbolos = ",".join(f'"{c}BRL"' for c in CRIPTOS)
+    data = _fazer_requisicao(BINANCE_BASE, params={"symbols": f"[{simbolos}]"})
+
+    registros = []
+    for item in data:
+        simbolo = item["symbol"]
+        cripto = simbolo.replace("BRL", "")
+        codigo = f"{cripto}-BRL"
+
+        bid = float(item.get("bidPrice", item["lastPrice"]))
+        ask = float(item.get("askPrice", item["lastPrice"]))
+        if bid == 0:
+            bid = float(item["lastPrice"])
+        if ask == 0:
+            ask = float(item["lastPrice"])
+
+        registros.append({
+            "codigo": codigo,
+            "nome": NOMES.get(codigo, codigo),
+            "bid": bid,
+            "ask": ask,
+            "alta": float(item["highPrice"]),
+            "baixa": float(item["lowPrice"]),
+            "variacao": float(item["priceChange"]),
+            "pct_variacao": float(item["priceChangePercent"]),
+            "timestamp_origem": datetime.fromtimestamp(
+                int(item["closeTime"]) / 1000, tz=timezone.utc
+            ),
+            "data_coleta": data_coleta,
+        })
+    return registros
+
+
+def buscar_cotacoes() -> pd.DataFrame:
+    """Orquestra a coleta nas duas fontes e retorna um DataFrame único."""
+    data_coleta = datetime.now(timezone.utc)
+    registros = []
+    registros.extend(_buscar_forex(data_coleta))
+    registros.extend(_buscar_cripto(data_coleta))
 
     df = pd.DataFrame(registros)
-    logger.info(f"Extraídos {len(df)} registros.")
+    logger.info(f"Extraídos {len(df)} registros de 2 fontes.")
     return df
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     df = buscar_cotacoes()
     print(df.to_string())
