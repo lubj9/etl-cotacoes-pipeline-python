@@ -10,7 +10,8 @@ Pipeline ETL em Python que coleta cotações de moedas e criptomoedas em tempo r
 
 Pipeline rodando em produção, agendado a cada 6 horas. Dados sendo persistidos em PostgreSQL gerenciado.
 
-> 📸 add print
+> <img width="633" height="335" alt="{1DC39839-F334-43D4-B832-42D157AA2C5F}" src="https://github.com/user-attachments/assets/eee08cfa-cdc5-4ad3-81b7-0876978ec343" />
+
 
 ---
 
