@@ -7,17 +7,6 @@ Decisão arquitetural:
 - Cripto (BTC, ETH vs BRL): CoinGecko API
     Endpoint público sem chave. Sem geo-block.
     Rate limit ~10-30 req/min — trivial para 4 execuções/dia.
-
-Histórico de decisões:
-1. AwesomeAPI (original): rate limit por IP saturado no GitHub Actions
-   (IP compartilhado com milhares de workflows).
-2. Binance pública (tentativa): bloqueada por geo-restrição (HTTP 451) em IPs US;
-   runners do GitHub Actions estão em Azure US.
-3. CoinGecko (atual): sem chave, sem geo-block, padrão da indústria
-   para projetos cripto open-source.
-
-Mantemos a estratégia de resiliência (retry, backoff, timeout) porque
-mesmo APIs robustas têm instabilidades pontuais.
 """
 import logging
 import time
