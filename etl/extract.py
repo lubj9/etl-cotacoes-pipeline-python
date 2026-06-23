@@ -4,17 +4,20 @@ Extração: busca cotações de moedas e criptomoedas via duas fontes complement
 Decisão arquitetural:
 - Forex (USD, EUR, GBP vs BRL): Frankfurter API
     Fonte: Banco Central Europeu. Sem chave, sem rate limit.
-- Cripto (BTC, ETH vs BRL): Binance API pública
-    Endpoints públicos sem chave, limit generoso (~1200/min por IP).
+- Cripto (BTC, ETH vs BRL): CoinGecko API
+    Endpoint público sem chave. Sem geo-block.
+    Rate limit ~10-30 req/min — trivial para 4 execuções/dia.
 
-Por que trocamos da AwesomeAPI original:
-    O IP do GitHub Actions é compartilhado entre milhares de workflows simultâneos.
-    APIs com rate limit por IP veem todo esse tráfego coletivo como vindo da mesma
-    origem, esgotando a cota mesmo quando o pipeline individual usa pouco.
-    Frankfurter e Binance pública não sofrem desse problema.
+Histórico de decisões:
+1. AwesomeAPI (original): rate limit por IP saturado no GitHub Actions
+   (IP compartilhado com milhares de workflows).
+2. Binance pública (tentativa): bloqueada por geo-restrição (HTTP 451) em IPs US;
+   runners do GitHub Actions estão em Azure US.
+3. CoinGecko (atual): sem chave, sem geo-block, padrão da indústria
+   para projetos cripto open-source.
 
-Mantemos a estratégia de resiliência (retry, backoff, timeout) porque mesmo
-APIs robustas têm instabilidades pontuais.
+Mantemos a estratégia de resiliência (retry, backoff, timeout) porque
+mesmo APIs robustas têm instabilidades pontuais.
 """
 import logging
 import time
@@ -27,8 +30,9 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Moedas a coletar
-MOEDAS_FOREX = ["USD", "EUR", "GBP"]  # cotação contra BRL
-CRIPTOS = ["BTC", "ETH"]              # contra BRL via Binance
+MOEDAS_FOREX = ["USD", "EUR", "GBP"]  # contra BRL via Frankfurter
+# CoinGecko usa identificadores próprios (ids), não tickers
+CRIPTOS = {"bitcoin": "BTC", "ethereum": "ETH"}
 
 NOMES = {
     "USD-BRL": "Dolar Americano/Real",
@@ -39,18 +43,18 @@ NOMES = {
 }
 
 FRANKFURTER_BASE = "https://api.frankfurter.dev/v1/latest"
-BINANCE_BASE = "https://api.binance.com/api/v3/ticker/24hr"
+COINGECKO_BASE = "https://api.coingecko.com/api/v3/coins/markets"
 
 # Configurações de resiliência
 MAX_TENTATIVAS = 4
 BACKOFF_INICIAL = 2
 TIMEOUT = 15
-USER_AGENT = "etl-cotacoes-pipeline/2.0 (github.com/lubj9)"
+USER_AGENT = "etl-cotacoes-pipeline/2.1 (github.com/lubj9)"
 
 
-def _fazer_requisicao(url: str, params: Optional[dict] = None) -> dict:
+def _fazer_requisicao(url: str, params: Optional[dict] = None):
     """Requisição HTTP com retry e backoff exponencial."""
-    headers = {"User-Agent": USER_AGENT}
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     espera = BACKOFF_INICIAL
 
     for tentativa in range(1, MAX_TENTATIVAS + 1):
@@ -129,37 +133,41 @@ def _buscar_forex(data_coleta: datetime) -> list[dict]:
 
 def _buscar_cripto(data_coleta: datetime) -> list[dict]:
     """
-    Busca BTC e ETH contra BRL via Binance pública.
+    Busca BTC e ETH contra BRL via CoinGecko.
+
+    O endpoint /coins/markets fornece em uma única requisição: preço atual,
+    máxima e mínima das últimas 24h, variação absoluta e percentual.
     """
-    logger.info("Buscando cripto via Binance...")
-    simbolos = ",".join(f'"{c}BRL"' for c in CRIPTOS)
-    data = _fazer_requisicao(BINANCE_BASE, params={"symbols": f"[{simbolos}]"})
+    logger.info("Buscando cripto via CoinGecko...")
+    data = _fazer_requisicao(
+        COINGECKO_BASE,
+        params={
+            "vs_currency": "brl",
+            "ids": ",".join(CRIPTOS.keys()),
+            "price_change_percentage": "24h",
+        },
+    )
 
     registros = []
     for item in data:
-        simbolo = item["symbol"]
-        cripto = simbolo.replace("BRL", "")
-        codigo = f"{cripto}-BRL"
+        ticker = CRIPTOS.get(item["id"])
+        if not ticker:
+            continue
+        codigo = f"{ticker}-BRL"
+        preco = float(item["current_price"])
 
-        bid = float(item.get("bidPrice", item["lastPrice"]))
-        ask = float(item.get("askPrice", item["lastPrice"]))
-        if bid == 0:
-            bid = float(item["lastPrice"])
-        if ask == 0:
-            ask = float(item["lastPrice"])
-
+        # CoinGecko não fornece bid/ask separados (não é exchange única);
+        # usamos o preço médio agregado, consistente em ambos os campos.
         registros.append({
             "codigo": codigo,
             "nome": NOMES.get(codigo, codigo),
-            "bid": bid,
-            "ask": ask,
-            "alta": float(item["highPrice"]),
-            "baixa": float(item["lowPrice"]),
-            "variacao": float(item["priceChange"]),
-            "pct_variacao": float(item["priceChangePercent"]),
-            "timestamp_origem": datetime.fromtimestamp(
-                int(item["closeTime"]) / 1000, tz=timezone.utc
-            ),
+            "bid": preco,
+            "ask": preco,
+            "alta": float(item.get("high_24h") or preco),
+            "baixa": float(item.get("low_24h") or preco),
+            "variacao": float(item.get("price_change_24h") or 0.0),
+            "pct_variacao": float(item.get("price_change_percentage_24h") or 0.0),
+            "timestamp_origem": datetime.now(timezone.utc),
             "data_coleta": data_coleta,
         })
     return registros
