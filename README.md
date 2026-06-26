@@ -38,7 +38,7 @@ Pipeline rodando em produção, agendado a cada 6 horas. Dados sendo persistidos
 | Banco (produção) | PostgreSQL (Supabase free tier) |
 | Banco (local) | SQLite (fallback automático) |
 | Orquestração | GitHub Actions |
-| Fonte de dados | [AwesomeAPI](https://docs.awesomeapi.com.br/) |
+| Fonte de dados | [FrankfurterAPI](https://api.frankfurter.dev/v1/latest) |
 
 ---
 
